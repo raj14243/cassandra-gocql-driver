@@ -324,6 +324,10 @@ type HostSelectionPolicy interface {
 	Pick(statement ExecutableStatement) NextHost
 }
 
+type SchemaRefreshNotifier interface {
+	SchemaRefreshed(meta *schemaMeta)
+}
+
 // SelectedHost is an interface returned when picking a host from a host
 // selection policy.
 type SelectedHost interface {
@@ -423,6 +427,7 @@ type tokenAwareHostPolicy struct {
 	fallback            HostSelectionPolicy
 	getKeyspaceMetadata func(keyspace string) (*KeyspaceMetadata, error)
 	getKeyspaceName     func() string
+	getSchemaMeta       func() *schemaMeta
 
 	shuffleReplicas          bool
 	nonLocalReplicasFallback bool
@@ -447,6 +452,7 @@ func (t *tokenAwareHostPolicy) Init(s *Session) {
 	}
 	t.getKeyspaceMetadata = s.KeyspaceMetadata
 	t.getKeyspaceName = func() string { return s.cfg.Keyspace }
+	t.getSchemaMeta = s.schemaDescriber.getSchemaMetaForRead
 	t.logger = s.logger
 }
 
@@ -454,36 +460,31 @@ func (t *tokenAwareHostPolicy) IsLocal(host *HostInfo) bool {
 	return t.fallback.IsLocal(host)
 }
 
-func (t *tokenAwareHostPolicy) KeyspaceChanged(update KeyspaceUpdateEvent) {
+// replica map is updated through the SchemaRefreshed callback
+func (t *tokenAwareHostPolicy) KeyspaceChanged(update KeyspaceUpdateEvent) {}
+
+func (t *tokenAwareHostPolicy) SchemaRefreshed(schemaMeta *schemaMeta) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	meta := t.getMetadataForUpdate()
-	t.updateReplicas(meta, update.Keyspace)
+	t.updateReplicas(meta, schemaMeta)
 	t.metadata.Store(meta)
 }
 
 // updateReplicas updates replicas in clusterMeta.
 // It must be called with t.mu mutex locked.
 // meta must not be nil and it's replicas field will be updated.
-func (t *tokenAwareHostPolicy) updateReplicas(meta *clusterMeta, keyspace string) {
-	newReplicas := make(map[string]tokenRingReplicas, len(meta.replicas))
-
-	ks, err := t.getKeyspaceMetadata(keyspace)
-	if err == nil {
-		strat := getStrategy(ks, t.logger)
+func (t *tokenAwareHostPolicy) updateReplicas(meta *clusterMeta, schemaMeta *schemaMeta) {
+	schema := schemaMeta.keyspaceMeta
+	newReplicas := make(map[string]tokenRingReplicas, len(schema))
+	for keyspace, metadata := range schema {
+		strat := getStrategy(metadata, t.logger)
 		if strat != nil {
 			if meta != nil && meta.tokenRing != nil {
 				newReplicas[keyspace] = strat.replicaMap(meta.tokenRing)
 			}
 		}
 	}
-
-	for ks, replicas := range meta.replicas {
-		if ks != keyspace {
-			newReplicas[ks] = replicas
-		}
-	}
-
 	meta.replicas = newReplicas
 }
 
@@ -496,7 +497,7 @@ func (t *tokenAwareHostPolicy) SetPartitioner(partitioner string) {
 		t.partitioner = partitioner
 		meta := t.getMetadataForUpdate()
 		meta.resetTokenRing(t.partitioner, t.hosts.get(), t.logger)
-		t.updateReplicas(meta, t.getKeyspaceName())
+		t.updateReplicas(meta, t.getSchemaMeta())
 		t.metadata.Store(meta)
 	}
 }
@@ -506,7 +507,7 @@ func (t *tokenAwareHostPolicy) AddHost(host *HostInfo) {
 	if t.hosts.add(host) {
 		meta := t.getMetadataForUpdate()
 		meta.resetTokenRing(t.partitioner, t.hosts.get(), t.logger)
-		t.updateReplicas(meta, t.getKeyspaceName())
+		t.updateReplicas(meta, t.getSchemaMeta())
 		t.metadata.Store(meta)
 	}
 	t.mu.Unlock()
@@ -523,7 +524,7 @@ func (t *tokenAwareHostPolicy) AddHosts(hosts []*HostInfo) {
 
 	meta := t.getMetadataForUpdate()
 	meta.resetTokenRing(t.partitioner, t.hosts.get(), t.logger)
-	t.updateReplicas(meta, t.getKeyspaceName())
+	t.updateReplicas(meta, t.getSchemaMeta())
 	t.metadata.Store(meta)
 
 	t.mu.Unlock()
@@ -538,7 +539,7 @@ func (t *tokenAwareHostPolicy) RemoveHost(host *HostInfo) {
 	if t.hosts.remove(host.ConnectAddress()) {
 		meta := t.getMetadataForUpdate()
 		meta.resetTokenRing(t.partitioner, t.hosts.get(), t.logger)
-		t.updateReplicas(meta, t.getKeyspaceName())
+		t.updateReplicas(meta, t.getSchemaMeta())
 		t.metadata.Store(meta)
 	}
 	t.mu.Unlock()

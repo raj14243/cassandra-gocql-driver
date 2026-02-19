@@ -163,6 +163,9 @@ func NewSession(cfg ClusterConfig) (*Session, error) {
 	}
 
 	s.schemaDescriber = newSchemaDescriber(s)
+	s.schemaDescriber.schemaRefresher = newRefreshDebouncer(schemaRefreshDebounceTime, func() error {
+		return refreshSchemas(s)
+	})
 
 	s.nodeEvents = newEventDebouncer("NodeEvents", s.handleNodeEvent, s.logger)
 	s.schemaEvents = newEventDebouncer("SchemaEvents", s.handleSchemaEvent, s.logger)
@@ -367,8 +370,12 @@ func (s *Session) init() error {
 
 	// Invoke KeyspaceChanged to let the policy cache the session keyspace
 	// parameters. This is used by tokenAwareHostPolicy to discover replicas.
-	if !s.cfg.disableControlConn && s.cfg.Keyspace != "" {
-		s.policy.KeyspaceChanged(KeyspaceUpdateEvent{Keyspace: s.cfg.Keyspace})
+	if !s.cfg.disableControlConn && s.schemaDescriber != nil {
+		err := s.schemaDescriber.refreshSchemaMetadata()
+		if err != nil {
+			s.logger.Warning("Unable to refresh schema metadata.",
+				NewLogFieldError("err", err))
+		}
 	}
 
 	s.sessionStateMu.Lock()
@@ -536,6 +543,10 @@ func (s *Session) Close() {
 
 	if s.ringRefresher != nil {
 		s.ringRefresher.stop()
+	}
+
+	if s.schemaDescriber != nil && s.schemaDescriber.schemaRefresher != nil {
+		s.schemaDescriber.schemaRefresher.stop()
 	}
 
 	if s.cancel != nil {

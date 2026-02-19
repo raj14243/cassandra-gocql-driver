@@ -118,7 +118,6 @@ func (s *Session) handleEvent(framer *framer) {
 	}
 
 	s.logger.Debug("Handling event frame.", NewLogFieldStringer("frame", frame))
-
 	switch f := frame.(type) {
 	case *schemaChangeKeyspace, *schemaChangeFunction,
 		*schemaChangeTable, *schemaChangeAggregate, *schemaChangeType:
@@ -137,16 +136,16 @@ func (s *Session) handleSchemaEvent(frames []frame) {
 	for _, frame := range frames {
 		switch f := frame.(type) {
 		case *schemaChangeKeyspace:
-			s.schemaDescriber.clearSchema(f.keyspace)
+			s.schemaDescriber.debounceRefreshSchemaMetadata()
 			s.handleKeyspaceChange(f.keyspace, f.change)
 		case *schemaChangeTable:
-			s.schemaDescriber.clearSchema(f.keyspace)
+			s.schemaDescriber.debounceRefreshSchemaMetadata()
 		case *schemaChangeAggregate:
-			s.schemaDescriber.clearSchema(f.keyspace)
+			s.schemaDescriber.debounceRefreshSchemaMetadata()
 		case *schemaChangeFunction:
-			s.schemaDescriber.clearSchema(f.keyspace)
+			s.schemaDescriber.debounceRefreshSchemaMetadata()
 		case *schemaChangeType:
-			s.schemaDescriber.clearSchema(f.keyspace)
+			s.schemaDescriber.debounceRefreshSchemaMetadata()
 		}
 	}
 }
